@@ -11,8 +11,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from .serializers import UserProfileSerializer
 
-from .models import User, OTP, Address, LinkedCard
-from .serializers import UserProfileSerializer, AddressSerializer, LinkedCardSerializer
+from .models import User, OTP, Address, LinkedCard, Vehicle
+from .serializers import UserProfileSerializer, AddressSerializer, LinkedCardSerializer, VehicleSerializer
 
 RESEND_COOLDOWN_SECONDS = 30
 OTP_TTL_SECONDS = 600  # 10 minutes
@@ -338,5 +338,76 @@ class LinkedCardDetailView(APIView):
         except LinkedCard.DoesNotExist:
             return Response(
                 {"error": "Card not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+class VehicleListCreateView(APIView):
+    def get(self, request):
+        vehicles = Vehicle.objects.filter(
+            user=request.user
+        ).order_by('-created_at')
+        serializer = VehicleSerializer(vehicles, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        serializer = VehicleSerializer(data=request.data)
+        if serializer.is_valid():
+            if request.data.get('is_default'):
+                Vehicle.objects.filter(
+                    user=request.user,
+                    is_default=True
+                ).update(is_default=False)
+            serializer.save(user=request.user)
+            return Response({
+                "message": "Vehicle saved successfully",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+        return Response(
+            serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+class VehicleDetailView(APIView):
+    def delete(self, request, pk):
+        try:
+            vehicle = Vehicle.objects.get(pk=pk, user=request.user)
+            vehicle.delete()
+            return Response(
+                {"message": "Vehicle deleted successfully"},
+                status=status.HTTP_200_OK
+            )
+        except Vehicle.DoesNotExist:
+            return Response(
+                {"error": "Vehicle not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+    def put(self, request, pk):
+        try:
+            vehicle = Vehicle.objects.get(pk=pk, user=request.user)
+            serializer = VehicleSerializer(
+                vehicle,
+                data=request.data,
+                partial=True
+            )
+            if serializer.is_valid():
+                if request.data.get('is_default'):
+                    Vehicle.objects.filter(
+                        user=request.user,
+                        is_default=True
+                    ).update(is_default=False)
+                serializer.save()
+                return Response({
+                    "message": "Vehicle updated successfully",
+                    "data": serializer.data
+                }, status=status.HTTP_200_OK)
+            return Response(
+                serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Vehicle.DoesNotExist:
+            return Response(
+                {"error": "Vehicle not found"},
                 status=status.HTTP_404_NOT_FOUND
             )

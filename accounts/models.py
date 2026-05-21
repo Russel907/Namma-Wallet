@@ -92,3 +92,32 @@ class LinkedCard(models.Model):
 
     def __str__(self):
         return f"{self.user.mobile_number} - {self.card_type} - {self.last_four_digits}"
+
+class Vehicle(models.Model):
+    VEHICLE_TYPES = [
+        ('CAR', 'Car'),
+        ('BIKE', 'Bike'),
+        ('AUTO', 'Auto'),
+        ('OTHER', 'Other'),
+    ]
+
+    # Connect to user
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='vehicles'
+    )
+
+    # Vehicle details
+    vehicle_name = models.CharField(max_length=100)
+    vehicle_number = models.CharField(max_length=20)
+    vehicle_type = models.CharField(
+        max_length=10,
+        choices=VEHICLE_TYPES,
+        default='CAR'
+    )
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.mobile_number} - {self.vehicle_type} - {self.vehicle_number}"

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User, Address, LinkedCard
+from .models import User, Address, LinkedCard, Vehicle
 
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
@@ -36,3 +36,16 @@ class LinkedCardSerializer(serializers.ModelSerializer):
             'created_at'
         ]
         read_only_fields = ['id', 'created_at']
+
+class VehicleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Vehicle
+        fields = [
+            'id',           
+            'vehicle_name',
+            'vehicle_number',
+            'vehicle_type',
+            'is_default',
+            'created_at'
+        ]
+        read_only_fields = ['id', 'created_at']  
