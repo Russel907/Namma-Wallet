@@ -5,6 +5,10 @@ class User(AbstractUser):
     mobile_number = models.CharField(max_length=15, unique=True)
     is_mobile_verified = models.BooleanField(default=False)
     
+    # Lockout fields
+    otp_locked_until = models.DateTimeField(null=True, blank=True)
+    failed_otp_attempts = models.IntegerField(default=0)
+    
     USERNAME_FIELD = 'mobile_number'
     REQUIRED_FIELDS = ['username']
 
@@ -18,6 +22,7 @@ class OTP(models.Model):
     provider_transaction_id = models.CharField(max_length=100, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     is_used = models.BooleanField(default=False)
+    wrong_attempts = models.IntegerField(default=0)
 
     def __str__(self):
         return f"{self.mobile_number} - {self.otp_code}"
@@ -28,29 +33,12 @@ class Address(models.Model):
         ('OFFICE', 'Office'),
         ('OTHER', 'Other'),
     ]
-    
-    # Which user this address belongs to
-    user = models.ForeignKey(
-        User, 
-        on_delete=models.CASCADE, 
-        related_name='addresses'
-    )
-    
-    # Type of address - Home, Office or Other
-    address_type = models.CharField(
-        max_length=10, 
-        choices=ADDRESS_TYPES, 
-        default='HOME'
-    )
-    
-    # Full address details
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='addresses')
+    address_type = models.CharField(max_length=10, choices=ADDRESS_TYPES, default='HOME')
     full_address = models.TextField()
     city = models.CharField(max_length=100)
     pincode = models.CharField(max_length=6)
-    
-    # Is this the default address?
     is_default = models.BooleanField(default=False)
-    
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -63,30 +51,18 @@ class LinkedCard(models.Model):
         ('RUPAY', 'RuPay'),
         ('AMEX', 'American Express'),
     ]
-
     CARD_CATEGORIES = [
         ('DEBIT', 'Debit Card'),
         ('CREDIT', 'Credit Card'),
     ]
-
-    # Which user this card belongs to
-    user = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE,
-        related_name='linked_cards'
-    )
-
-    # Card details — never store full number!
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='linked_cards')
     card_holder_name = models.CharField(max_length=100)
     last_four_digits = models.CharField(max_length=4)
     card_type = models.CharField(max_length=15, choices=CARD_TYPES)
     card_category = models.CharField(max_length=10, choices=CARD_CATEGORIES)
     expiry_month = models.CharField(max_length=2)
     expiry_year = models.CharField(max_length=4)
-
-    # Token from payment gateway — used instead of full card number
     gateway_token = models.CharField(max_length=255, blank=True, null=True)
-
     is_default = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -100,22 +76,10 @@ class Vehicle(models.Model):
         ('AUTO', 'Auto'),
         ('OTHER', 'Other'),
     ]
-
-    # Connect to user
-    user = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE,
-        related_name='vehicles'
-    )
-
-    # Vehicle details
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='vehicles')
     vehicle_name = models.CharField(max_length=100)
     vehicle_number = models.CharField(max_length=20)
-    vehicle_type = models.CharField(
-        max_length=10,
-        choices=VEHICLE_TYPES,
-        default='CAR'
-    )
+    vehicle_type = models.CharField(max_length=10, choices=VEHICLE_TYPES, default='CAR')
     is_default = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 

@@ -1,3 +1,4 @@
+import re
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.views import APIView
@@ -5,17 +6,17 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import User, OTP
-from .utils import send_otp_via_messagecentral, verify_otp_via_messagecentral
-from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
-from .serializers import UserProfileSerializer
-
 from .models import User, OTP, Address, LinkedCard, Vehicle
+from .utils import send_otp_via_messagecentral, verify_otp_via_messagecentral
 from .serializers import UserProfileSerializer, AddressSerializer, LinkedCardSerializer, VehicleSerializer
 
+# Constants
 RESEND_COOLDOWN_SECONDS = 30
-OTP_TTL_SECONDS = 600  # 10 minutes
+OTP_TTL_SECONDS = 300        # 5 minutes
+MAX_OTP_PER_DAY = 5          # max 5 OTPs per day
+MAX_WRONG_ATTEMPTS = 3       # max 3 wrong tries per OTP
+
 
 def get_tokens_for_user(user):
     refresh = RefreshToken.for_user(user)
@@ -23,6 +24,7 @@ def get_tokens_for_user(user):
         'refresh': str(refresh),
         'access': str(refresh.access_token),
     }
+
 
 class SendOTPView(APIView):
     permission_classes = [AllowAny]
@@ -36,13 +38,47 @@ class SendOTPView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if len(mobile_number) != 10:
+        if not re.match(r'^[6-9]\d{9}$', mobile_number):
             return Response(
-                {"error": "Enter a valid 10 digit mobile number"},
+                {"error": "Enter a valid 10 digit Indian mobile number"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Cooldown check
+        # Check if user exists and is locked out
+        user = User.objects.filter(mobile_number=mobile_number).first()
+        just_unlocked = False
+
+        if user and user.otp_locked_until:
+            if timezone.now() < user.otp_locked_until:
+                remaining = int((user.otp_locked_until - timezone.now()).total_seconds() / 60)
+                return Response(
+                    {
+                        "error": f"Too many failed attempts. Try again after {remaining} minutes.",
+                        "locked_until": user.otp_locked_until
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS
+                )
+            else:
+                # Lockout just expired — give one chance
+                user.otp_locked_until = None
+                user.failed_otp_attempts = 0 
+                user.save()
+                just_unlocked = True
+
+        # Daily cap check — skip if user just came out of lockout
+        if not just_unlocked:
+            otp_count_today = OTP.objects.filter(
+                mobile_number=mobile_number,
+                created_at__date=timezone.now().date()
+            ).count()
+
+            if otp_count_today >= MAX_OTP_PER_DAY:
+                return Response(
+                    {"error": "Maximum OTP requests reached for today. Please try again tomorrow."},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS
+                )
+
+        # Resend cooldown check
         last_otp = OTP.objects.filter(
             mobile_number=mobile_number,
             is_used=False
@@ -69,7 +105,7 @@ class SendOTPView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        # Save OTP record with MessageCentral's verification ID
+        # Save OTP record — never delete these, needed for audit!
         otp_obj = OTP.objects.create(
             mobile_number=mobile_number,
             otp_code='mc_generated'
@@ -84,7 +120,7 @@ class SendOTPView(APIView):
         return Response(
             {
                 "message": "OTP sent successfully",
-                "expires_in": "10 minutes"
+                "expires_in": "5 minutes"
             },
             status=status.HTTP_200_OK
         )
@@ -103,6 +139,30 @@ class VerifyOTPView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        if not re.match(r'^[6-9]\d{9}$', mobile_number):
+            return Response(
+                {"error": "Enter a valid 10 digit Indian mobile number"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check if user is locked out
+        user = User.objects.filter(mobile_number=mobile_number).first()
+
+        if user and user.otp_locked_until:
+            if timezone.now() < user.otp_locked_until:
+                remaining = int((user.otp_locked_until - timezone.now()).total_seconds() / 60)
+                return Response(
+                    {
+                        "error": f"Account locked. Try again after {remaining} minutes.",
+                        "locked_until": user.otp_locked_until
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS
+                )
+            else:
+                # Lockout expired — reset only lockout time
+                user.otp_locked_until = None
+                user.save()
+
         # Get latest unused OTP
         try:
             otp = OTP.objects.filter(
@@ -115,12 +175,21 @@ class VerifyOTPView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Check expiry
+        # Check OTP expiry
         expiry_time = otp.created_at + timedelta(seconds=OTP_TTL_SECONDS)
         if timezone.now() > expiry_time:
+            otp.is_used = True
+            otp.save()
             return Response(
                 {"error": "OTP has expired. Please request a new one."},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check if OTP already blocked
+        if otp.wrong_attempts >= MAX_WRONG_ATTEMPTS:
+            return Response(
+                {"error": "OTP blocked due to too many wrong attempts. Please request a new one."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
             )
 
         # Check verification ID exists
@@ -138,12 +207,46 @@ class VerifyOTPView(APIView):
         )
 
         if not ok:
+            # Wrong OTP — increment wrong attempts
+            otp.wrong_attempts += 1
+            otp.save()
+
+            remaining_attempts = MAX_WRONG_ATTEMPTS - otp.wrong_attempts
+
+            if otp.wrong_attempts >= MAX_WRONG_ATTEMPTS:
+                otp.is_used = True
+                otp.save()
+
+                if user:
+                    user.failed_otp_attempts += 1
+                    # Progressive lockout
+                    if user.failed_otp_attempts == 1:
+                        lockout_time = 15 # change to 30 for production
+                    elif user.failed_otp_attempts == 2:
+                        lockout_time = 60
+                    elif user.failed_otp_attempts == 3:
+                        lockout_time = 1440
+                    else:
+                        lockout_time = 4320
+                    user.otp_locked_until = timezone.now() + timedelta(minutes=lockout_time)
+                    user.save()
+
+                return Response(
+                    {
+                        "error": f"Too many wrong attempts. Account locked for {lockout_time} minutes.",
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS
+                )
+
             return Response(
-                {"error": "Invalid OTP. Please try again."},
+                {
+                    "error": "Invalid OTP. Please try again.",
+                    "remaining_attempts": remaining_attempts
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Mark OTP as used
+        # OTP verified successfully!
         otp.is_used = True
         otp.save()
 
@@ -153,14 +256,14 @@ class VerifyOTPView(APIView):
             defaults={'username': mobile_number}
         )
 
-        # Mark mobile as verified
+        # Reset ALL counters on successful login
         user.is_mobile_verified = True
+        user.failed_otp_attempts = 0
+        user.otp_locked_until = None
         user.save()
 
-
-        # Generate JWT tokens
         tokens = get_tokens_for_user(user)
-        
+
         return Response({
             "message": "OTP verified successfully",
             "access": tokens['access'],
@@ -175,7 +278,11 @@ class UserProfileView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def put(self, request):
-        serializer = UserProfileSerializer(request.user, data=request.data, partial=True)
+        serializer = UserProfileSerializer(
+            request.user,
+            data=request.data,
+            partial=True
+        )
         if serializer.is_valid():
             serializer.save()
             return Response({
@@ -183,6 +290,7 @@ class UserProfileView(APIView):
                 "data": serializer.data
             }, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 class LogoutView(APIView):
     def post(self, request):
@@ -208,17 +316,18 @@ class LogoutView(APIView):
             status=status.HTTP_200_OK
         )
 
+
 class AddressListCreateView(APIView):
     def get(self, request):
-        # Get all addresses of logged in user
-        addresses = Address.objects.filter(user=request.user).order_by('-created_at')
+        addresses = Address.objects.filter(
+            user=request.user
+        ).order_by('-created_at')
         serializer = AddressSerializer(addresses, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
         serializer = AddressSerializer(data=request.data)
         if serializer.is_valid():
-            # If this is set as default, remove default from all other addresses
             if request.data.get('is_default'):
                 Address.objects.filter(
                     user=request.user,
@@ -250,7 +359,11 @@ class AddressDetailView(APIView):
     def put(self, request, pk):
         try:
             address = Address.objects.get(pk=pk, user=request.user)
-            serializer = AddressSerializer(address, data=request.data, partial=True)
+            serializer = AddressSerializer(
+                address,
+                data=request.data,
+                partial=True
+            )
             if serializer.is_valid():
                 if request.data.get('is_default'):
                     Address.objects.filter(
@@ -269,6 +382,7 @@ class AddressDetailView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
+
 class LinkedCardListCreateView(APIView):
     def get(self, request):
         cards = LinkedCard.objects.filter(
@@ -280,7 +394,6 @@ class LinkedCardListCreateView(APIView):
     def post(self, request):
         serializer = LinkedCardSerializer(data=request.data)
         if serializer.is_valid():
-            # If this is set as default, remove default from others
             if request.data.get('is_default'):
                 LinkedCard.objects.filter(
                     user=request.user,
@@ -340,6 +453,7 @@ class LinkedCardDetailView(APIView):
                 {"error": "Card not found"},
                 status=status.HTTP_404_NOT_FOUND
             )
+
 
 class VehicleListCreateView(APIView):
     def get(self, request):
